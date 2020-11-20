@@ -91,12 +91,9 @@ func (l *ZkEventListener) ListenServiceNodeEvent(zkPath string, listener ...remo
 				logger.Warnf("zk.ExistW(key{%s}) = event{EventNodeDeleted}", zkPath)
 				return true
 			}
-		case <-l.client.Done():
-			return false
 		}
 	}
 
-	return false
 }
 
 func (l *ZkEventListener) handleZkNodeEvent(zkPath string, children []string, listener remoting.DataListener) {
@@ -211,10 +208,6 @@ func (l *ZkEventListener) listenDirEvent(zkPath string, listener remoting.DataLi
 			case <-getty.GetTimeWheel().After(timeSecondDuration(failTimes * ConnDelay)):
 				l.client.UnregisterEvent(zkPath, &event)
 				continue
-			case <-l.client.Done():
-				l.client.UnregisterEvent(zkPath, &event)
-				logger.Warnf("client.done(), listen(path{%s}) goroutine exit now...", zkPath)
-				return
 			case <-event:
 				logger.Infof("get zk.EventNodeDataChange notify event")
 				l.client.UnregisterEvent(zkPath, &event)
@@ -232,15 +225,21 @@ func (l *ZkEventListener) listenDirEvent(zkPath string, listener remoting.DataLi
 			_, ok := l.pathMap[dubboPath]
 			l.pathMapLock.Unlock()
 			if ok {
-				logger.Warnf("@zkPath %s has already been listened.", zkPath)
+				logger.Warnf("@zkPath %s has already been listened.", dubboPath)
 				continue
 			}
 
 			l.pathMapLock.Lock()
 			l.pathMap[dubboPath] = struct{}{}
 			l.pathMapLock.Unlock()
-
+			// When Zk disconnected, the Conn will be set to nil, so here need check the value of Conn
+			l.client.RLock()
+			if l.client.Conn == nil {
+				l.client.RUnlock()
+				break
+			}
 			content, _, err := l.client.Conn.Get(dubboPath)
+			l.client.RUnlock()
 			if err != nil {
 				logger.Errorf("Get new node path {%v} 's content error,message is  {%v}", dubboPath, perrors.WithStack(err))
 			}
@@ -253,6 +252,9 @@ func (l *ZkEventListener) listenDirEvent(zkPath string, listener remoting.DataLi
 			go func(zkPath string, listener remoting.DataListener) {
 				if l.ListenServiceNodeEvent(zkPath) {
 					listener.DataChange(remoting.Event{Path: zkPath, Action: remoting.EventTypeDel})
+					l.pathMapLock.Lock()
+					defer l.pathMapLock.Unlock()
+					delete(l.pathMap, zkPath)
 				}
 				logger.Warnf("listenSelf(zk path{%s}) goroutine exit now", zkPath)
 			}(dubboPath, listener)
@@ -276,9 +278,6 @@ func (l *ZkEventListener) listenDirEvent(zkPath string, listener remoting.DataLi
 				continue
 			}
 			l.handleZkNodeEvent(zkEvent.Path, children, listener)
-		case <-l.client.Done():
-			logger.Warnf("client.done(), listen(path{%s}) goroutine exit now...", zkPath)
-			return
 		}
 	}
 }

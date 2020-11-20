@@ -18,16 +18,13 @@
 package zookeeper
 
 import (
+	"github.com/apache/dubbo-go/common/logger"
 	"sync"
-)
-import (
-	"github.com/dubbogo/getty"
-	perrors "github.com/pkg/errors"
+	"time"
 )
 
 import (
 	"github.com/apache/dubbo-go/common"
-	"github.com/apache/dubbo-go/common/logger"
 )
 
 type zkClientFacade interface {
@@ -42,50 +39,15 @@ type zkClientFacade interface {
 
 // HandleClientRestart ...
 func HandleClientRestart(r zkClientFacade) {
-	var (
-		err error
-
-		failTimes int
-	)
-
-	defer r.WaitGroup().Done()
-LOOP:
 	for {
 		select {
+		case <-r.ZkClient().Reconnect():
+			r.RestartCallBack()
+			time.Sleep(10 * time.Microsecond)
 		case <-r.Done():
-			logger.Warnf("(ZkProviderRegistry)reconnectZkRegistry goroutine exit now...")
-			break LOOP
-			// re-register all services
-		case <-r.ZkClient().Done():
-			r.ZkClientLock().Lock()
-			r.ZkClient().Close()
-			zkName := r.ZkClient().name
-			zkAddress := r.ZkClient().ZkAddrs
-			r.SetZkClient(nil)
-			r.ZkClientLock().Unlock()
-
-			// Connect zk until success.
-			failTimes = 0
-			for {
-				select {
-				case <-r.Done():
-					logger.Warnf("(ZkProviderRegistry)reconnectZkRegistry goroutine exit now...")
-					break LOOP
-				case <-getty.GetTimeWheel().After(timeSecondDuration(failTimes * ConnDelay)): // Prevent crazy reconnection zk.
-				}
-				err = ValidateZookeeperClient(r, WithZkName(zkName))
-				logger.Infof("ZkProviderRegistry.validateZookeeperClient(zkAddr{%s}) = error{%#v}",
-					zkAddress, perrors.WithStack(err))
-				if err == nil {
-					if r.RestartCallBack() {
-						break
-					}
-				}
-				failTimes++
-				if MaxFailTimes <= failTimes {
-					failTimes = MaxFailTimes
-				}
-			}
+			logger.Warnf("receive registry destroy, so HandleClientRestart quit")
+			r.WaitGroup().Done()
+			return
 		}
 	}
 }

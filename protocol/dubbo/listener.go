@@ -135,7 +135,7 @@ func (h *RpcClientHandler) OnMessage(session getty.Session, pkg interface{}) {
 	pendingResponse.response.atta = p.Body.(*Response).atta
 
 	if pendingResponse.callback == nil {
-		pendingResponse.done <- struct{}{}
+		close(pendingResponse.done)
 	} else {
 		pendingResponse.callback(pendingResponse.GetCallResponse())
 	}

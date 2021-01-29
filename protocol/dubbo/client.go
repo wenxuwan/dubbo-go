@@ -22,24 +22,22 @@ import (
 	"strings"
 	"sync"
 	"time"
+)
 
+import (
 	hessian "github.com/apache/dubbo-go-hessian2"
 	"github.com/dubbogo/getty"
-
 	gxsync "github.com/dubbogo/gost/sync"
-
 	perrors "github.com/pkg/errors"
 	"go.uber.org/atomic"
 	"gopkg.in/yaml.v2"
 )
 
-
+import (
 	"github.com/apache/dubbo-go/common"
 	"github.com/apache/dubbo-go/common/constant"
 	"github.com/apache/dubbo-go/common/logger"
 	"github.com/apache/dubbo-go/config"
-	uatomic "go.uber.org/atomic"
-	"gopkg.in/yaml.v2"
 )
 
 var (

@@ -257,22 +257,14 @@ func (c *Client) call(ct CallType, request *Request, response *Response, callbac
 	var (
 		err     error
 		session getty.Session
-		conn    *gettyRPCClient
 	)
-	conn, session, err = c.selectSession(request.addr)
+	_, session, err = c.selectSession(request.addr)
 	if err != nil {
 		return perrors.WithStack(err)
 	}
 	if session == nil {
 		return errSessionNotExist
 	}
-	defer func() {
-		if err == nil {
-			c.pool.put(conn)
-			return
-		}
-		conn.close()
-	}()
 
 	if err = c.transfer(session, p, rsp); err != nil {
 		return perrors.WithStack(err)

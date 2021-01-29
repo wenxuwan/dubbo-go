@@ -312,10 +312,15 @@ func (p *gettyRPCClientPool) close() {
 }
 
 func (p *gettyRPCClientPool) getGettyRpcClient(protocol, addr string) (*gettyRPCClient, error) {
+	p.Lock()
+	defer p.Unlock()
 	conn, err := p.get()
 	if err == nil && conn == nil {
 		// create new conn
 		rpcClientConn, err := newGettyRPCClientConn(p, protocol, addr)
+		if err == nil {
+			p.put(rpcClientConn)
+		}
 		return rpcClientConn, perrors.WithStack(err)
 	}
 	return conn, perrors.WithStack(err)
@@ -323,19 +328,23 @@ func (p *gettyRPCClientPool) getGettyRpcClient(protocol, addr string) (*gettyRPC
 
 func (p *gettyRPCClientPool) get() (*gettyRPCClient, error) {
 	now := time.Now().Unix()
-	p.Lock()
-	defer p.Unlock()
 	if p.conns == nil {
 		return nil, errClientPoolClosed
 	}
-
-	for len(p.conns) > 0 {
-		conn := p.conns[len(p.conns)-1]
-		p.conns = p.conns[:len(p.conns)-1]
-
+	if len(p.conns) < p.size {
+		return nil, nil
+	}
+	for num := len(p.conns); num > 0; {
+		var conn *gettyRPCClient
+		if num != 1 {
+			conn = p.conns[rand.Int31n(int32(num))]
+		} else {
+			conn = p.conns[0]
+		}
 		if d := now - conn.getActive(); d > p.ttl {
 			p.remove(conn)
 			go conn.close()
+			num = len(p.conns)
 			continue
 		}
 		conn.updateActive(now) //update active time
@@ -348,10 +357,6 @@ func (p *gettyRPCClientPool) put(conn *gettyRPCClient) {
 	if conn == nil || conn.getActive() == 0 {
 		return
 	}
-
-	p.Lock()
-	defer p.Unlock()
-
 	if p.conns == nil {
 		return
 	}

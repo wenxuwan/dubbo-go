@@ -183,6 +183,7 @@ func (c *gettyRPCClient) removeSession(session getty.Session) {
 		}
 	}()
 	if removeFlag {
+		c.pool.safeRemove(c)
 		c.close()
 	}
 }
@@ -283,115 +284,116 @@ func (c *gettyRPCClient) close() error {
 }
 
 type gettyRPCClientPool struct {
-	rpcClient     *Client
-	maxSize       int   // maxSize of poolQueue
-	ttl           int64 // ttl of every gettyRPCClient, it is checked when getConn
-	activeNumber  uint32
-	chInitialized uint32 // set to 1 when field ch is initialized
-	ch            chan struct{}
-	closeCh       chan struct{}
-	poolQueue     *poolDequeue // store *gettyRPCClient
-	pushing       chan struct{}
-	sync.RWMutex
+	rpcClient *Client
+	size      int   // size of []*gettyRPCClient
+	ttl       int64 // ttl of every gettyRPCClient, it is checked when getConn
+
+	sync.Mutex
+	conns []*gettyRPCClient
 }
 
 func newGettyRPCClientConnPool(rpcClient *Client, size int, ttl time.Duration) *gettyRPCClientPool {
-	pq := &poolDequeue{
-		vals: make([]eface, size),
-	}
 	return &gettyRPCClientPool{
 		rpcClient: rpcClient,
-		maxSize:   size,
+		size:      size,
 		ttl:       int64(ttl.Seconds()),
-		closeCh:   make(chan struct{}, 0),
-		pushing:   make(chan struct{}, 1),
-		poolQueue: pq,
+		conns:     make([]*gettyRPCClient, 0, 16),
 	}
 }
 
 func (p *gettyRPCClientPool) close() {
 	p.Lock()
-	connPool := p.poolQueue
-	p.poolQueue = nil
+	conns := p.conns
+	p.conns = nil
 	p.Unlock()
-	for {
-		conn, ok := connPool.popTail()
-		if ok {
-			c := conn.(*gettyRPCClient)
-			c.close()
-		} else {
-			break
-		}
+	for _, conn := range conns {
+		conn.close()
 	}
-}
-
-func (p *gettyRPCClientPool) lazyInit() {
-	// Fast path.
-	if atomic.LoadUint32(&p.chInitialized) == 1 {
-		return
-	}
-	// Slow path.
-	p.Lock()
-	if p.chInitialized == 0 {
-		p.ch = make(chan struct{}, p.maxSize)
-		for i := 0; i < p.maxSize; i++ {
-			p.ch <- struct{}{}
-		}
-		p.pushing <- struct{}{}
-		atomic.StoreUint32(&p.chInitialized, 1)
-	}
-	p.Unlock()
-}
-
-func (p *gettyRPCClientPool) waitVacantConn() error {
-	p.lazyInit()
-	select {
-	case <-p.ch:
-		// Additionally check that close chan hasn't expired while we were waiting,
-		// because `select` picks a random `case` if several of them are "ready".
-		select {
-		case <-p.closeCh:
-			return errClientPoolClosed
-		default:
-		}
-	case <-p.closeCh:
-		return errClientPoolClosed
-	}
-	return nil
 }
 
 func (p *gettyRPCClientPool) getGettyRpcClient(protocol, addr string) (*gettyRPCClient, error) {
-	err := p.waitVacantConn()
-	if err != nil {
-		return nil, err
-	}
-	conn, err := p.getConnFromPoll()
+	conn, err := p.get()
 	if err == nil && conn == nil {
+		// create new conn
 		rpcClientConn, err := newGettyRPCClientConn(p, protocol, addr)
 		return rpcClientConn, perrors.WithStack(err)
-
 	}
 	return conn, perrors.WithStack(err)
 }
 
-func (p *gettyRPCClientPool) getConnFromPoll() (*gettyRPCClient, error) {
+func (p *gettyRPCClientPool) get() (*gettyRPCClient, error) {
 	now := time.Now().Unix()
-	if p.poolQueue == nil {
+	p.Lock()
+	defer p.Unlock()
+	if p.conns == nil {
 		return nil, errClientPoolClosed
 	}
-	for {
-		value, ok := p.poolQueue.popTail()
-		if ok {
-			conn := value.(*gettyRPCClient)
-			if d := now - conn.getActive(); d > p.ttl {
-				go conn.close()
-				continue
-			}
-			conn.updateActive(now)
-			return conn, nil
-		} else {
-			break
+
+	for len(p.conns) > 0 {
+		conn := p.conns[len(p.conns)-1]
+		p.conns = p.conns[:len(p.conns)-1]
+
+		if d := now - conn.getActive(); d > p.ttl {
+			p.remove(conn)
+			go conn.close()
+			continue
 		}
+		conn.updateActive(now) //update active time
+		return conn, nil
 	}
 	return nil, nil
+}
+
+func (p *gettyRPCClientPool) put(conn *gettyRPCClient) {
+	if conn == nil || conn.getActive() == 0 {
+		return
+	}
+
+	p.Lock()
+	defer p.Unlock()
+
+	if p.conns == nil {
+		return
+	}
+
+	// check whether @conn has existed in p.conns or not.
+	for i := range p.conns {
+		if p.conns[i] == conn {
+			return
+		}
+	}
+
+	if len(p.conns) >= p.size {
+		// delete @conn from client pool
+		// p.remove(conn)
+		conn.close()
+		return
+	}
+	p.conns = append(p.conns, conn)
+}
+
+func (p *gettyRPCClientPool) remove(conn *gettyRPCClient) {
+	if conn == nil || conn.getActive() == 0 {
+		return
+	}
+
+	if p.conns == nil {
+		return
+	}
+
+	if len(p.conns) > 0 {
+		for idx, c := range p.conns {
+			if conn == c {
+				p.conns = append(p.conns[:idx], p.conns[idx+1:]...)
+				break
+			}
+		}
+	}
+}
+
+func (p *gettyRPCClientPool) safeRemove(conn *gettyRPCClient) {
+	p.Lock()
+	defer p.Unlock()
+
+	p.remove(conn)
 }

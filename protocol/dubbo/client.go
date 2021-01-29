@@ -29,6 +29,10 @@ import (
 	gxsync "github.com/dubbogo/gost/sync"
 
 	perrors "github.com/pkg/errors"
+	"go.uber.org/atomic"
+	"gopkg.in/yaml.v2"
+)
+
 
 	"github.com/apache/dubbo-go/common"
 	"github.com/apache/dubbo-go/common/constant"
@@ -132,7 +136,7 @@ type Client struct {
 	opts     Options
 	conf     ClientConfig
 	pool     *gettyRPCClientPool
-	sequence uatomic.Uint64
+	sequence atomic.Uint64
 
 	pendingResponses *sync.Map
 }
@@ -266,19 +270,10 @@ func (c *Client) call(ct CallType, request *Request, response *Response, callbac
 	}
 	defer func() {
 		if err == nil {
-			for {
-				select {
-				case <-c.pool.pushing:
-					c.pool.poolQueue.pushHead(conn)
-					c.pool.pushing <- struct{}{}
-					c.pool.ch <- struct{}{}
-					return
-				}
-			}
-		} else {
-			c.pool.ch <- struct{}{}
-			conn.close()
+			c.pool.put(conn)
+			return
 		}
+		conn.close()
 	}()
 
 	if err = c.transfer(session, p, rsp); err != nil {
